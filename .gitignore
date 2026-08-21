@@ -1,0 +1,36 @@
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+venv/
+env/
+.venv/
+ENV/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Log files
+*.log
+app.log
+ngrok.log
+services.log
+
+# Generated post backups & runtime history
+Twits/
+posted_history.json
+
+# Temporary & scratch files
+scratch/
+
+# Operating System & IDE files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo

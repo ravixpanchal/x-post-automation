@@ -1,0 +1,9 @@
+[Unit]
+Description=Twitter Automation - Hourly Post Generator Timer
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
