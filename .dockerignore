@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+app.log
+services.log
+ngrok.log
+scratch/
+posted_history.json
+docker-compose.yml
+README.md
+video_script.md

@@ -1,0 +1,31 @@
+services:
+  twitter-automation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: twitter-automation:latest
+    container_name: twitter-automation
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - CHROME_PROFILE_DIR=/root/.config/twitter-automation-chrome-profile
+      - PLAYWRIGHT_CHANNEL=
+      - NGROK_DOMAIN=${NGROK_DOMAIN:-matted-crested-hesitancy.ngrok-free.dev}
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-3FewNCTIwS3rhmkpmFUctJMo46L_6eVHrUsnSWZGYzU9wRznM}
+      - GENERATE_INTERVAL_HOURS=${GENERATE_INTERVAL_HOURS:-1}
+      - X_AUTH_TOKEN=${X_AUTH_TOKEN:-}
+      - X_CT0=${X_CT0:-}
+    ports:
+      - "5000:5000"
+      - "4040:4040"
+    volumes:
+      # Mount authenticated Twitter Chrome profile from host
+      - /home/ravi/.config/twitter-automation-chrome-profile:/root/.config/twitter-automation-chrome-profile
+      # Mount host Ngrok authtoken/config
+      - /home/ravi/.config/ngrok:/root/.config/ngrok
+      # Persist auth state, posted history & screenshots
+      - ./auth_state.json:/app/auth_state.json
+      - ./posted_history.json:/app/posted_history.json
+      - ./scratch:/app/scratch
+      - ./Twits:/app/Twits
