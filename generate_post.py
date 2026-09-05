@@ -1,9 +1,41 @@
 from datetime import datetime
+import json
 import os
 import random
+import re
+import requests
 from send_to_slack import send_tweet_to_slack
 
-# A pool of 30 high-quality AI-related tweets/posts
+# OpenRouter Free API configuration
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+PREFERRED_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+
+# Static default fallback models
+FALLBACK_FREE_MODELS = [
+    PREFERRED_MODEL,
+    "openrouter/free",
+    "minimax/minimax-m3:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "dots-studio/dots-3-note-preview:free",
+    "cohere/north-mini-code:free"
+]
+
+# AI topics to ensure wide topic coverage and unique generation every time
+AI_TOPICS = [
+    "Autonomous AI agents, reasoning loops, and multi-step tool integration",
+    "AI reasoning models and optimizing inference-time compute",
+    "Small Language Models (SLMs) running locally on edge devices and smartphones",
+    "RAG (Retrieval-Augmented Generation) vs fine-tuning for dynamic enterprise AI",
+    "Open-source LLMs closing the performance gap with proprietary frontier models",
+    "AI-assisted software engineering, pair-programming tools, and code evaluation",
+    "Multi-modal AI advancements integrating text, vision, audio, and code",
+    "AI safety, guardrails, hallucination reduction, and LLM observability",
+    "The latest AI concepts, architecture shifts, and industry trends"
+]
+
+# Local fallback pool of 30 high-quality AI-related tweets/posts
 AI_POSTS = [
     "AI agents are transitioning from simple chat interfaces to autonomous entities capable of reasoning, planning, and tool use. The future of software engineering is collaborative. #AIAgents #GenAI #FutureOfWork",
     "Open-source LLMs like Llama and Mistral are closing the gap with proprietary models. Democratization of AI is key to open innovation and custom enterprise solutions. #OpenSource #AI #MachineLearning",
@@ -45,7 +77,7 @@ VARIATION_PREFIXES = [
     "⚡ Quick Thought: ",
     "🤖 AI Trends: ",
     "🧠 Engineering Insight: ",
-    "✨ Key Takeaway: ",
+    "✨ Key Takeaway: "
 ]
 
 VARIATION_SUFFIXES = [
@@ -53,10 +85,198 @@ VARIATION_SUFFIXES = [
     " How are you seeing this shift in your workflow?",
     " Do you agree with this trend?",
     " What has your experience been with this?",
-    " Share your perspective below!",
+    " Share your perspective below!"
 ]
 
-import json
+def fetch_active_free_models():
+    """Fetch currently active free models dynamically from OpenRouter API."""
+    try:
+        res = requests.get("https://openrouter.ai/api/v1/models", timeout=5)
+        if res.status_code == 200:
+            data = res.json().get("data", [])
+            fetched = []
+            for m in data:
+                mid = m.get("id", "")
+                pricing = m.get("pricing", {})
+                if ":free" in mid or (pricing.get("prompt") == "0" and pricing.get("completion") == "0"):
+                    if "nemotron-3.5-lightning" not in mid:
+                        fetched.append(mid)
+            if fetched:
+                combined = []
+                for model_candidate in [PREFERRED_MODEL, "openrouter/free"] + fetched + FALLBACK_FREE_MODELS:
+                    if model_candidate and model_candidate not in combined:
+                        combined.append(model_candidate)
+                return combined
+    except Exception as e:
+        print(f"⚠️ Dynamic model fetch note: {e}")
+    return FALLBACK_FREE_MODELS
+
+def is_reasoning_or_cot(text):
+    """Detect if text contains internal LLM thinking process, planning notes, or prompt analysis."""
+    if not text:
+        return True
+    cot_patterns = [
+        r"analyze\s+(the\s+)?(request|user\s+request|prompt)",
+        r"thinking\s+process",
+        r"here's\s+a\s+thinking",
+        r"\*\*topic:\*\*",
+        r"\*\*platform:\*\*",
+        r"\*\*constraints:\*\*",
+        r"strictly\s+under\s+\d+",
+        r"check\s+character\s+count",
+        r"user\s+prompt",
+        r"character\s+count",
+        r"identify\s+key\s+constraints"
+    ]
+    for pattern in cot_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True
+    return False
+
+def extract_clean_tweet(text):
+    """Smartly extract real tweet content even if LLM included reasoning/planning text."""
+    if not text:
+        return ""
+
+    # Strip <think>...</think> reasoning blocks
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+
+    # 1. Search for text under "Drafting - Attempt 1:", "Final Tweet:", "Tweet:", "Post:"
+    draft_match = re.search(
+        r'(?:drafting|attempt\s*\d+|final tweet|tweet|post)[\s\w\-\:\*]*\n+([^\n]+)',
+        text,
+        re.IGNORECASE
+    )
+    if draft_match:
+        candidate = draft_match.group(1).strip().strip('"\'`')
+        if len(candidate) >= 30 and not is_reasoning_or_cot(candidate):
+            return candidate
+
+    # 2. Search for quoted text string "..."
+    quoted_match = re.search(r'"([^"\n]{30,280})"', text)
+    if quoted_match:
+        candidate = quoted_match.group(1).strip()
+        if not is_reasoning_or_cot(candidate) and ('#' in candidate or len(candidate) > 40):
+            return candidate
+
+    # 3. Split into paragraphs and find non-CoT paragraph from bottom up
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+    for block in reversed(blocks):
+        if is_reasoning_or_cot(block):
+            continue
+        clean_b = re.sub(r'^(tweet|post|final tweet|result|draft):\s*', '', block, flags=re.IGNORECASE).strip()
+        clean_b = clean_b.strip('"\'`')
+        if len(clean_b) >= 30 and len(clean_b) <= 280 and not is_reasoning_or_cot(clean_b):
+            return clean_b
+
+    # 4. If whole text is clean without CoT markers, use it directly
+    text_clean = text.strip().strip('"\'`')
+    text_clean = re.sub(r'^(tweet|post|final tweet|result|draft):\s*', '', text_clean, flags=re.IGNORECASE).strip()
+    if len(text_clean) >= 30 and len(text_clean) <= 280 and not is_reasoning_or_cot(text_clean):
+        return text_clean
+
+    return ""
+
+def clean_and_format_tweet(text):
+    """Format extracted tweet, append hashtags if missing, and enforce length <= 280."""
+    extracted = extract_clean_tweet(text)
+    if not extracted:
+        return ""
+
+    # Ensure hashtags exist
+    hashtags = re.findall(r'#\w+', extracted)
+    if not hashtags:
+        extracted = extracted.rstrip('.') + " #AI #Tech"
+        hashtags = ['#AI', '#Tech']
+
+    # If within 280 chars, return directly
+    if len(extracted) <= 280:
+        return extracted
+
+    # Smart truncation if slightly over 280 chars while preserving hashtags
+    hashtag_str = " " + " ".join(hashtags[:3])
+    allowed_len = 280 - len(hashtag_str)
+
+    body = extracted[:allowed_len]
+    last_punct = max(body.rfind('.'), body.rfind('!'), body.rfind('?'))
+    if last_punct > 80:
+        body = body[:last_punct + 1]
+    else:
+        last_space = body.rfind(' ')
+        if last_space > 40:
+            body = body[:last_space]
+
+    trimmed = (body.strip() + hashtag_str).strip()
+    return trimmed if len(trimmed) <= 280 else trimmed[:280]
+
+
+def generate_openrouter_post(existing_tweets):
+    """Generates a fresh, unique 280-character X post using OpenRouter Free API."""
+    if not OPENROUTER_API_KEY:
+        print("No OpenRouter API key provided. Falling back to local pool.")
+        return None
+
+    models_to_try = fetch_active_free_models()
+
+    system_prompt = (
+        "You are a top-tier tech thought leader and AI developer posting on X (Twitter).\n"
+        "Write a concise, high-value X post about modern AI trends, news, or engineering concepts.\n"
+        "STRICT REQUIREMENTS:\n"
+        "1. Write ONLY the final tweet text. DO NOT write any thinking process, analysis, or preamble.\n"
+        "2. MUST be between 140 and 260 characters total.\n"
+        "3. MUST include 2-3 relevant hashtags (e.g. #AI #GenAI #Tech #DevTools #LLM)."
+    )
+
+    for attempt in range(6):
+        topic = random.choice(AI_TOPICS)
+        model = models_to_try[attempt % len(models_to_try)]
+        print(f"🤖 Requesting OpenRouter post using model '{model}' (Topic: {topic})...")
+        
+        try:
+            res = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://github.com/ravixpanchal/x-post-automation",
+                    "X-Title": "Twitter Automation Bot"
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Generate a post about: {topic}. Ensure it is unique and engaging."}
+                    ],
+                    "temperature": 0.8,
+                    "max_tokens": 300
+                },
+                timeout=12
+            )
+
+            if res.status_code == 200:
+                data = res.json()
+                choices = data.get("choices", [])
+                if choices:
+                    msg = choices[0].get("message", {})
+                    # Check both content and reasoning fields from OpenRouter response
+                    content = msg.get("content") or msg.get("reasoning") or ""
+                    cleaned_post = clean_and_format_tweet(content)
+
+                    if cleaned_post and cleaned_post not in existing_tweets and len(cleaned_post) <= 280:
+                        print(f"✅ Successfully generated unique AI post via OpenRouter ({model}):")
+                        return cleaned_post
+                    elif cleaned_post in existing_tweets:
+                        print(f"⚠️ Generated post was a duplicate of previous post. Retrying...")
+                    else:
+                        print(f"⚠️ Response from {model} was invalid or CoT reasoning text. Retrying...")
+            else:
+                print(f"⚠️ OpenRouter API ({model}) status {res.status_code}: {res.text[:120]}")
+        except Exception as e:
+            print(f"⚠️ OpenRouter API call error ({model}): {e}")
+
+    print("⚠️ OpenRouter attempts exhausted or failed. Using fallback generator.")
+    return None
+
 
 def generate_and_send_post():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -83,36 +303,39 @@ def generate_and_send_post():
                 except Exception:
                     pass
 
-    # Find unused base posts
-    unused_posts = [post for post in AI_POSTS if post.strip() not in existing_tweets]
+    # Try OpenRouter Free API generation first
+    selected_tweet = generate_openrouter_post(existing_tweets)
 
-    if unused_posts:
-        selected_tweet = random.choice(unused_posts)
-    else:
-        print("All base posts used once. Generating a clean, unique variation...")
-        # Generate a unique variation using professional prefixes/suffixes (no dates)
-        candidates = []
-        for base in AI_POSTS:
-            for prefix in VARIATION_PREFIXES:
-                var1 = f"{prefix}{base}"
-                if var1 not in existing_tweets:
-                    candidates.append(var1)
-            for suffix in VARIATION_SUFFIXES:
-                var2 = f"{base}{suffix}"
-                if var2 not in existing_tweets:
-                    candidates.append(var2)
-
-        if candidates:
-            selected_tweet = random.choice(candidates)
+    # Local fallback logic if OpenRouter API unavailable or failed
+    if not selected_tweet:
+        unused_posts = [post for post in AI_POSTS if post.strip() not in existing_tweets]
+        if unused_posts:
+            selected_tweet = random.choice(unused_posts)
         else:
-            # Fallback: combine prefix and suffix if all single variations were used
-            base = random.choice(AI_POSTS)
-            selected_tweet = f"{random.choice(VARIATION_PREFIXES)}{base}{random.choice(VARIATION_SUFFIXES)}"
+            print("All base posts used once. Generating a clean, unique variation...")
+            candidates = []
+            for base in AI_POSTS:
+                for prefix in VARIATION_PREFIXES:
+                    var1 = f"{prefix}{base}"
+                    if var1 not in existing_tweets:
+                        candidates.append(var1)
+                for suffix in VARIATION_SUFFIXES:
+                    var2 = f"{base}{suffix}"
+                    if var2 not in existing_tweets:
+                        candidates.append(var2)
+
+            if candidates:
+                selected_tweet = random.choice(candidates)
+            else:
+                base = random.choice(AI_POSTS)
+                selected_tweet = f"{random.choice(VARIATION_PREFIXES)}{base}{random.choice(VARIATION_SUFFIXES)}"
 
     print("Tweet Content:", selected_tweet)
+    print("Tweet Length:", len(selected_tweet))
 
     # Send to Slack
     send_tweet_to_slack(selected_tweet)
+
 
 if __name__ == "__main__":
     generate_and_send_post()
